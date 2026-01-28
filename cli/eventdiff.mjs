@@ -252,5 +252,11 @@ const final = {
   reports,
 };
 
+console.log("EventDiff: " + final.summary.decision + " | blocks=" + final.summary.blocks + " warns=" + final.summary.warns + " passes=" + final.summary.passes);
+for (const r of final.reports) {
+  for (const c of r.changes) {
+    if (c.severity === "block") console.log("BLOCK: " + r.file + " :: " + c.kind + " :: " + c.path + " :: " + c.message);
+  }
+}
 console.log(JSON.stringify(final, null, 2));
 process.exit(anyBlock ? 1 : 0);
