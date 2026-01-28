@@ -25,4 +25,4 @@ jobs:
 
       - name: Run EventDiff
         working-directory: cli
-        run: node eventdiff.mjs --base=${{ github.event.pull_request.base.sha }} --head=${{ github.event.pull_request.head.sha }} --dir=schemas
+        run: node eventdiff.mjs --base=${{ github.event.pull_request.base.sha }} --head=${{ github.event.pull_request.head.sha }} --dir=../schemas
