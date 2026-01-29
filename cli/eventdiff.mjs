@@ -1,4 +1,6 @@
 import { execSync } from "node:child_process";
+import fs from "node:fs";
+
 
 const args = Object.fromEntries(
   process.argv.slice(2).map((x) => {
@@ -10,6 +12,38 @@ const args = Object.fromEntries(
 const base = args.base;
 const head = args.head;
 const dir = args.dir || "schemas";
+const DEFAULT_POLICY = {
+  FIELD_REMOVED_REQUIRED: "block",
+  FIELD_REMOVED_OPTIONAL: "warn",
+  FIELD_ADDED_REQUIRED: "block",
+  FIELD_ADDED_OPTIONAL: "pass",
+  REQUIRED_BECOMES_REQUIRED: "block",
+  REQUIRED_BECOMES_OPTIONAL: "warn",
+  TYPE_CHANGED: "block",
+  ENUM_VALUE_REMOVED: "block",
+  ENUM_VALUE_ADDED: "pass",
+  FILE_REMOVED: "block",
+  FILE_ADDED: "pass",
+  INVALID_JSON: "block"
+};
+
+let POLICY = DEFAULT_POLICY;
+
+// config is optional; default policy still works if file is missing
+try {
+  const cfgText = fs.readFileSync("eventdiff.config.json", "utf8");
+  const cfg = JSON.parse(cfgText);
+  if (cfg && cfg.policy && typeof cfg.policy === "object") {
+    POLICY = { ...DEFAULT_POLICY, ...cfg.policy };
+  }
+} catch {
+  // ignore
+}
+
+function sev(key) {
+  return POLICY[key] || "warn";
+}
+
 
 if (!base || !head) {
   console.error("Usage: node eventdiff.mjs --base=<sha> --head=<sha> [--dir=schemas]");
@@ -112,7 +146,7 @@ function diff(oldSchema, newSchema) {
 
     if (a && !b) {
       changes.push({
-        severity: a.required ? "block" : "warn",
+        severity: a.required ? sev("FIELD_REMOVED_REQUIRED") : sev("FIELD_REMOVED_OPTIONAL"),
         kind: "FIELD_REMOVED",
         path,
         message: a.required ? `Removed required field '${path}'.` : `Removed optional field '${path}'.`,
@@ -122,7 +156,7 @@ function diff(oldSchema, newSchema) {
 
     if (!a && b) {
       changes.push({
-        severity: b.required ? "block" : "pass",
+        severity: b.required ? sev("FIELD_ADDED_REQUIRED") : sev("FIELD_ADDED_OPTIONAL"),
         kind: "FIELD_ADDED",
         path,
         message: b.required ? `Added required field '${path}'.` : `Added optional field '${path}'.`,
@@ -134,7 +168,7 @@ function diff(oldSchema, newSchema) {
 
     if (a.required !== b.required) {
       changes.push({
-        severity: !a.required && b.required ? "block" : "warn",
+        severity: !a.required && b.required ? sev("REQUIRED_BECOMES_REQUIRED") : sev("REQUIRED_BECOMES_OPTIONAL"),
         kind: "REQUIRED_CHANGED",
         path,
         message: !a.required && b.required
@@ -145,8 +179,8 @@ function diff(oldSchema, newSchema) {
 
     if (a.type !== b.type || a.nullable !== b.nullable) {
       changes.push({
-        severity: "block",
-        kind: "TYPE_CHANGED",
+        severity: sev("TYPE_CHANGED"),
+kind: "TYPE_CHANGED",
         path,
         message: `Type changed '${path}': ${a.type}${a.nullable ? " (nullable)" : ""} → ${b.type}${b.nullable ? " (nullable)" : ""}`,
       });
@@ -155,16 +189,16 @@ function diff(oldSchema, newSchema) {
     const ed = enumDiff(a.enum, b.enum);
     if (ed.removed.length) {
       changes.push({
-        severity: "block",
-        kind: "ENUM_VALUE_REMOVED",
+        severity: sev("ENUM_VALUE_REMOVED"),
+kind: "ENUM_VALUE_REMOVED",
         path,
         message: `Enum removed from '${path}': ${ed.removed.join(", ")}`,
       });
     }
     if (ed.added.length) {
       changes.push({
-        severity: "pass",
-        kind: "ENUM_VALUE_ADDED",
+        severity: sev("ENUM_VALUE_ADDED"),
+kind: "ENUM_VALUE_ADDED",
         path,
         message: `Enum added to '${path}': ${ed.added.join(", ")}`,
       });
@@ -202,7 +236,7 @@ for (const path of changed) {
     reports.push({
       file: path,
       summary: { decision: "PASS", blocks: 0, warns: 0, passes: 1 },
-      changes: [{ severity: "pass", kind: "FILE_ADDED", path, message: `Schema file added: ${path}` }],
+      changes: [{ severity: sev("FILE_ADDED"), kind: "FILE_ADDED", path, message: `Schema file added: ${path}` }],
     });
     continue;
   }
@@ -210,7 +244,8 @@ for (const path of changed) {
     reports.push({
       file: path,
       summary: { decision: "FAIL", blocks: 1, warns: 0, passes: 0 },
-      changes: [{ severity: "block", kind: "FILE_REMOVED", path, message: `Schema file removed: ${path}` }],
+      changes: [{ severity: sev("FILE_REMOVED"), kind: "FILE_REMOVED",
+ path, message: `Schema file removed: ${path}` }],
     });
     anyBlock = true;
     continue;
@@ -224,8 +259,8 @@ for (const path of changed) {
       file: path,
       summary: { decision: "FAIL", blocks: 1, warns: 0, passes: 0 },
       changes: [{
-        severity: "block",
-        kind: "INVALID_JSON",
+        severity: sev("INVALID_JSON"),
+kind: "INVALID_JSON",
         path,
         message: `Invalid JSON in ${!oldParsed.ok ? "base" : "head"} version of ${path}.`,
       }],
