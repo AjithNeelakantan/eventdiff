@@ -29,22 +29,52 @@ const DEFAULT_POLICY = {
   INVALID_JSON: "block"
 };
 
-let POLICY = DEFAULT_POLICY;
+let POLICY_DEFAULT = { ...DEFAULT_POLICY };
+let POLICY_OVERRIDES_BY_OWNER = {};
 
 // config is optional; default policy still works if file is missing
 try {
-  const ownersText = fs.readFileSync(path.join("..", "owners.json"), "utf8");
+  const cfgText = fs.readFileSync("eventdiff.config.json", "utf8");
   const cfg = JSON.parse(cfgText);
+
+  // New format:
+  // { policy: { default: {...}, overrides_by_owner: { "team-x": {...} } } }
   if (cfg && cfg.policy && typeof cfg.policy === "object") {
-    POLICY = { ...DEFAULT_POLICY, ...cfg.policy };
+    if (cfg.policy.default && typeof cfg.policy.default === "object") {
+      POLICY_DEFAULT = { ...DEFAULT_POLICY, ...cfg.policy.default };
+    } else {
+      // Backward-compat: old flat map under policy
+      POLICY_DEFAULT = { ...DEFAULT_POLICY, ...cfg.policy };
+    }
+
+    if (cfg.policy.overrides_by_owner && typeof cfg.policy.overrides_by_owner === "object") {
+      POLICY_OVERRIDES_BY_OWNER = cfg.policy.overrides_by_owner;
+    }
   }
 } catch {
   // ignore
 }
 
-function sev(key) {
-  return POLICY[key] || "warn";
+const SEV_RANK = { pass: 0, warn: 1, block: 2 };
+function maxSev(a, b) {
+  return (SEV_RANK[a] ?? 1) >= (SEV_RANK[b] ?? 1) ? a : b;
 }
+
+function sevForOwner(key, ownerTeams) {
+  // start from default
+  let s = POLICY_DEFAULT[key] || "warn";
+
+  // apply strictest override across all owners (if multiple)
+  for (const team of ownerTeams || []) {
+    const teamPolicy = POLICY_OVERRIDES_BY_OWNER[team];
+    if (teamPolicy && typeof teamPolicy === "object") {
+      const override = teamPolicy[key];
+      if (override) s = maxSev(s, override);
+    }
+  }
+  return s;
+}
+
 
 // owners.json is optional
 let OWNERS = {};
@@ -151,7 +181,7 @@ function enumDiff(oldEnum, newEnum) {
   return { removed, added };
 }
 
-function diff(oldSchema, newSchema) {
+function diff(oldSchema, newSchema, ownerTeams) {
   const A = flatten(oldSchema);
   const B = flatten(newSchema);
   const paths = new Set([...A.keys(), ...B.keys()]);
@@ -163,7 +193,7 @@ function diff(oldSchema, newSchema) {
 
     if (a && !b) {
       changes.push({
-        severity: a.required ? sev("FIELD_REMOVED_REQUIRED") : sev("FIELD_REMOVED_OPTIONAL"),
+        severity: a.required ? sevForOwner("FIELD_REMOVED_REQUIRED", ownerTeams) : sevForOwner("FIELD_REMOVED_OPTIONAL", ownerTeams),
         kind: "FIELD_REMOVED",
         path,
         message: a.required ? `Removed required field '${path}'.` : `Removed optional field '${path}'.`,
@@ -173,7 +203,7 @@ function diff(oldSchema, newSchema) {
 
     if (!a && b) {
       changes.push({
-        severity: b.required ? sev("FIELD_ADDED_REQUIRED") : sev("FIELD_ADDED_OPTIONAL"),
+        severity: b.required ? sevForOwner("FIELD_ADDED_REQUIRED", ownerTeams) : sevForOwner("FIELD_ADDED_OPTIONAL", ownerTeams),
         kind: "FIELD_ADDED",
         path,
         message: b.required ? `Added required field '${path}'.` : `Added optional field '${path}'.`,
@@ -185,7 +215,7 @@ function diff(oldSchema, newSchema) {
 
     if (a.required !== b.required) {
       changes.push({
-        severity: !a.required && b.required ? sev("REQUIRED_BECOMES_REQUIRED") : sev("REQUIRED_BECOMES_OPTIONAL"),
+        severity: !a.required && b.required ? sevForOwner("REQUIRED_BECOMES_REQUIRED", ownerTeams) : sevForOwner("REQUIRED_BECOMES_OPTIONAL", ownerTeams),
         kind: "REQUIRED_CHANGED",
         path,
         message: !a.required && b.required
@@ -196,7 +226,7 @@ function diff(oldSchema, newSchema) {
 
     if (a.type !== b.type || a.nullable !== b.nullable) {
       changes.push({
-        severity: sev("TYPE_CHANGED"),
+        severity: sevForOwner("TYPE_CHANGED", ownerTeams),
 kind: "TYPE_CHANGED",
         path,
         message: `Type changed '${path}': ${a.type}${a.nullable ? " (nullable)" : ""} → ${b.type}${b.nullable ? " (nullable)" : ""}`,
@@ -206,7 +236,7 @@ kind: "TYPE_CHANGED",
     const ed = enumDiff(a.enum, b.enum);
     if (ed.removed.length) {
       changes.push({
-        severity: sev("ENUM_VALUE_REMOVED"),
+        severity: sevForOwner("ENUM_VALUE_REMOVED", ownerTeams),
 kind: "ENUM_VALUE_REMOVED",
         path,
         message: `Enum removed from '${path}': ${ed.removed.join(", ")}`,
@@ -214,7 +244,7 @@ kind: "ENUM_VALUE_REMOVED",
     }
     if (ed.added.length) {
       changes.push({
-        severity: sev("ENUM_VALUE_ADDED"),
+        severity: sevForOwner("ENUM_VALUE_ADDED", ownerTeams),
 kind: "ENUM_VALUE_ADDED",
         path,
         message: `Enum added to '${path}': ${ed.added.join(", ")}`,
@@ -266,6 +296,8 @@ const reports = [];
 let anyBlock = false;
 
 for (const path of changed) {
+  const eventName = eventNameFromFile(path);
+  const ownerTeams = OWNERS[eventName] || [];
   const oldFile = tryGitShow(base, path);
   const newFile = tryGitShow(head, path);
 
@@ -273,7 +305,8 @@ for (const path of changed) {
     reports.push({
       file: path,
       summary: { decision: "PASS", blocks: 0, warns: 0, passes: 1 },
-      changes: [{ severity: sev("FILE_ADDED"), kind: "FILE_ADDED", path, message: `Schema file added: ${path}` }],
+      changes: [{ severity: sevForOwner("FILE_ADDED", ownerTeams),
+ kind: "FILE_ADDED", path, message: `Schema file added: ${path}` }],
     });
     continue;
   }
@@ -281,7 +314,8 @@ for (const path of changed) {
     reports.push({
       file: path,
       summary: { decision: "FAIL", blocks: 1, warns: 0, passes: 0 },
-      changes: [{ severity: sev("FILE_REMOVED"), kind: "FILE_REMOVED",
+      changes: [{ severity: sevForOwner("FILE_REMOVED", ownerTeams),
+ kind: "FILE_REMOVED",
  path, message: `Schema file removed: ${path}` }],
     });
     anyBlock = true;
@@ -296,7 +330,7 @@ for (const path of changed) {
       file: path,
       summary: { decision: "FAIL", blocks: 1, warns: 0, passes: 0 },
       changes: [{
-        severity: sev("INVALID_JSON"),
+        severity: sevForOwner("INVALID_JSON", ownerTeams),
 kind: "INVALID_JSON",
         path,
         message: `Invalid JSON in ${!oldParsed.ok ? "base" : "head"} version of ${path}.`,
@@ -306,7 +340,7 @@ kind: "INVALID_JSON",
     continue;
   }
 
-  const r = diff(oldParsed.value, newParsed.value);
+  const r = diff(oldParsed.value, newParsed.value, ownerTeams);
   reports.push({ file: path, ...r });
   if (r.summary.blocks > 0) anyBlock = true;
 }
