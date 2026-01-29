@@ -33,7 +33,7 @@ let POLICY = DEFAULT_POLICY;
 
 // config is optional; default policy still works if file is missing
 try {
-  const cfgText = fs.readFileSync("eventdiff.config.json", "utf8");
+  const ownersText = fs.readFileSync(path.join("..", "owners.json"), "utf8");
   const cfg = JSON.parse(cfgText);
   if (cfg && cfg.policy && typeof cfg.policy === "object") {
     POLICY = { ...DEFAULT_POLICY, ...cfg.policy };
@@ -45,6 +45,21 @@ try {
 function sev(key) {
   return POLICY[key] || "warn";
 }
+
+// owners.json is optional
+let OWNERS = {};
+try {
+  const ownersText = fs.readFileSync("owners.json", "utf8");
+  const ownersCfg = JSON.parse(ownersText);
+  if (ownersCfg && typeof ownersCfg === "object") OWNERS = ownersCfg;
+} catch {
+  // ignore
+}
+
+function eventNameFromFile(filePath) {
+  return path.basename(filePath).replace(/\.json$/, "");
+}
+
 
 
 if (!base || !head) {
@@ -223,7 +238,27 @@ const changed = sh(`git diff --name-only ${base} ${head} -- ${dir}`)
   .filter(Boolean);
 
 if (changed.length === 0) {
-  console.log(JSON.stringify({ summary: { decision: "PASS", blocks: 0, warns: 0, passes: 0 }, changes: [] }, null, 2));
+  const final = {
+    base,
+    head,
+    dir,
+    summary: { decision: "PASS", blocks: 0, warns: 0, passes: 0 },
+    reports: [],
+  };
+
+  console.log("EventDiff: PASS | blocks=0 warns=0 passes=0");
+
+  const ownerTeams = new Set();
+  // no changed files, but we can still mention ownership config exists
+  if (ownerTeams.size > 0) {
+    console.log(`Owner: ${Array.from(ownerTeams).join(", ")}`);
+    console.log("ACTION: Request review from owner team(s) above");
+  } else {
+    console.log("Owner: (none configured for changed files)");
+    console.log("ACTION: No schema changes detected");
+  }
+
+  console.log(JSON.stringify(final, null, 2));
   process.exit(0);
 }
 
@@ -289,5 +324,31 @@ const final = {
   reports,
 };
 
+const label = anyBlock ? "FAIL" : (final.summary.warns > 0 ? "WARN" : "PASS");
+console.log(`EventDiff: ${label} | blocks=${final.summary.blocks} warns=${final.summary.warns} passes=${final.summary.passes}`);
+
+const ownerTeams = new Set();
+for (const r of reports) {
+  const eventName = eventNameFromFile(r.file);
+  const teams = OWNERS[eventName] || [];
+  for (const t of teams) ownerTeams.add(t);
+}
+
+if (ownerTeams.size > 0) {
+  console.log(`Owner: ${Array.from(ownerTeams).join(", ")}`);
+  console.log("ACTION: Request review from owner team(s) above");
+} else {
+  console.log("Owner: (none configured)");
+  console.log("ACTION: Add owners.json mapping for this event");
+}
+
+for (const r of reports) {
+  for (const c of r.changes) {
+    if (c.severity === "block") console.log(`BLOCK: ${c.kind} - ${c.message}`);
+    if (c.severity === "warn") console.log(`WARN: ${c.kind} - ${c.message}`);
+  }
+}
+
 console.log(JSON.stringify(final, null, 2));
 process.exit(anyBlock ? 1 : 0);
+
